@@ -1,0 +1,55 @@
+# ============================================================
+# HDL Localization - Optimized Parameters
+# Fixes: position drift, noise sensitivity, rotation errors
+# ============================================================
+
+# --- NDT Registration ---
+# DIRECT7: stable 7-neighbor search (vs DIRECT1 which is unstable)
+# Trade-off: slightly slower but far more accurate
+reg_method: "NDT_OMP"
+ndt_neighbor_search_method: "DIRECT7"
+ndt_neighbor_search_radius: 2.0
+
+# Finer resolution = better position accuracy
+# 1.0 -> 0.5: captures more detail, better for corridors
+ndt_resolution: 0.5
+
+# --- Point Cloud Filtering ---
+# Pre-filtered cloud comes from pointcloud_filter_node
+# This downsampling is the final step inside NDT
+downsample_resolution: 0.1
+
+# --- IMU Integration ---
+# Enables gyro-based rotation prediction between LiDAR scans
+# Significantly improves rotation correction and fast turn handling
+use_imu: true
+invert_acc: false
+invert_gyro: false
+# Ignore IMU during first 2s (settling time)
+cool_time_duration: 2.0
+
+# --- Odometry Prediction ---
+# Use wheel odom as motion model prior for NDT
+# Reduces position drift when LiDAR features are sparse
+enable_robot_odometry_prediction: true
+robot_odom_frame_id: "odom"
+
+# --- Frame IDs ---
+odom_child_frame_id: "base_footprint"
+
+# --- Map Loading ---
+# Global map downsampling (separate from scan downsampling)
+globalmap_downsample_resolution: 0.1
+
+# --- Initial Pose ---
+# Global localization will override these
+specify_init_pose: true
+init_pos_x: 0.0
+init_pos_y: 0.0
+init_pos_z: 0.0
+init_ori_w: 1.0
+init_ori_x: 0.0
+init_ori_y: 0.0
+init_ori_z: 0.0
+
+use_global_localization: true

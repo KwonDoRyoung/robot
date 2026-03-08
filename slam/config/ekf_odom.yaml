@@ -1,0 +1,78 @@
+# ============================================================
+# robot_localization EKF - Odom Frame
+# Fuses: Wheel odometry + IMU
+# Output: odom -> base_footprint transform (local dead-reckoning)
+# ============================================================
+
+frequency: 50          # Higher rate for smooth local motion
+sensor_timeout: 0.1
+
+map_frame: map
+odom_frame: odom
+base_link_frame: base_footprint
+world_frame: odom      # <-- world_frame=odom for local odometry
+
+two_d_mode: false      # Use IMU roll/pitch to correct motion model
+
+publish_tf: true
+print_diagnostics: false
+
+# --- Wheel Odometry ---
+odom0: /odom
+# [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+odom0_config: [false, false, false,
+               false, false, false,
+               true,  false, false,   # vx only (differential drive)
+               false, false, true,    # vyaw
+               false, false, false]
+odom0_differential: false
+odom0_relative: false
+odom0_queue_size: 10
+
+# --- IMU (VectorNav VN100/VN200) ---
+imu0: /imu/data
+imu0_config: [false, false, false,
+              true,  true,  false,    # roll, pitch (not yaw - let odom handle yaw)
+              false, false, false,
+              true,  true,  true,     # angular velocity (all axes)
+              true,  true,  false]    # linear accel x,y (not z - gravity)
+imu0_differential: false
+imu0_remove_gravitational_acceleration: true
+imu0_queue_size: 10
+# Reject spurious IMU spikes (noise fix)
+imu0_rejection_threshold: 2.5
+imu0_nodelay: false
+
+# --- Process Noise ---
+# Tuned for YHS differential drive robot
+process_noise_covariance: [0.05,  0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0.05,  0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0.06,  0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0.03,  0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0.03,  0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0.06,  0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0.025,  0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0.025,  0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0.04,  0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0.01,  0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0.01,  0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0.02,  0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0.01,  0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0.01,  0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0.015]
+
+initial_estimate_covariance: [1e-9, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    1e-9, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    1e-9, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    1e-9, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    1e-9, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    1e-9, 0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    1e-9, 0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    1e-9, 0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    1e-9, 0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-9, 0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-9, 0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-9, 0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-9, 0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-9, 0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-9]

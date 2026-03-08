@@ -1,0 +1,39 @@
+# ============================================================
+# Point Cloud Pre-filter Parameters
+# Applied BEFORE NDT localization to reduce noise
+# ============================================================
+
+# Input/Output topics
+input_topic: "/rslidar_points"
+output_topic: "/livox/lidar_filtered"
+
+# --- Distance filter (PassThrough) ---
+# Remove points too close (sensor blind zone) or too far
+distance_near_threshold: 0.5    # meters - min distance (matches fast_lio blind: 0.5)
+distance_far_threshold: 50.0    # meters - max useful range for localization
+
+# --- Voxel Grid Downsampling ---
+# Reduces density while preserving structure
+# Smaller leaf = more detail = slower NDT
+voxel_leaf_size: 0.1            # meters
+
+# --- Statistical Outlier Removal ---
+# Removes floating noise points
+# Increase mean_k for stronger filtering (slower)
+sor_mean_k: 20                  # neighbors to analyze per point
+sor_std_dev_mul_threshold: 2.0  # reject points > 2 std devs from mean
+
+# --- Radius Outlier Removal (optional - enable for severe noise) ---
+# Good for reflective surfaces, glass, transparent objects
+ror_enable: false
+ror_radius_search: 0.5          # meters
+ror_min_neighbors: 5
+
+# --- Height filter (Z-axis PassThrough) ---
+# Remove ground and ceiling from localization cloud (focus on walls)
+height_filter_enable: true
+height_min: 0.2                 # meters from base_footprint
+height_max: 2.0                 # meters from base_footprint
+
+# Frame ID
+fixed_frame: "base_footprint"

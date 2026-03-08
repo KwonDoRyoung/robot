@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!--
+  robot_localization.launch
+
+  Dual EKF setup:
+  - ekf_odom: odom + IMU -> odom frame (local dead-reckoning at 50Hz)
+  - ekf_map:  HDL pose + IMU -> map frame (global correction at 20Hz)
+-->
+<launch>
+  <arg name="odom_topic" default="/odom" />
+  <arg name="imu_topic"  default="/imu/data" />
+
+  <!-- EKF 1: odom frame (wheel odom + IMU) -->
+  <node pkg="robot_localization" type="ekf_localization_node"
+        name="ekf_localization_odom" output="screen" clear_params="true">
+    <rosparam file="$(find robot_slam)/config/ekf_odom.yaml" command="load" />
+    <remap from="/odometry/filtered" to="/odometry/filtered_odom" />
+    <param name="odom0" value="$(arg odom_topic)" />
+    <param name="imu0"  value="$(arg imu_topic)" />
+  </node>
+
+  <!-- EKF 2: map frame (HDL pose + IMU) -->
+  <node pkg="robot_localization" type="ekf_localization_node"
+        name="ekf_localization_map" output="screen" clear_params="true">
+    <rosparam file="$(find robot_slam)/config/ekf_map.yaml" command="load" />
+    <remap from="/odometry/filtered" to="/odometry/filtered_map" />
+    <param name="imu0" value="$(arg imu_topic)" />
+    <!-- odom0 = /odom_3d_corrected (nav_msgs/Odometry from pose_correction_node) -->
+    <param name="odom0" value="/odom_3d_corrected" />
+  </node>
+</launch>

@@ -1,0 +1,101 @@
+<?xml version="1.0"?>
+<!--
+  slam_localization.launch
+
+  Main entry point for SLAM localization stack.
+
+  Usage:
+    roslaunch robot_slam slam_localization.launch
+    roslaunch robot_slam slam_localization.launch map_pcd:=/path/to/map.pcd
+    roslaunch robot_slam slam_localization.launch use_imu:=true use_ekf:=true
+
+  Fixes:
+    - 위치 보정: DIRECT7 NDT + odom prediction + EKF map fusion
+    - 노이즈 문제: pre-filter node (voxel + SOR) before NDT
+    - 회전 보정: IMU integration in HDL + EKF with IMU orientation
+-->
+<launch>
+  <!-- ===== Arguments ===== -->
+  <arg name="map_pcd"        default="$(find fast_lio)/PCD/scans.pcd" />
+  <arg name="points_topic"   default="/livox/lidar_filtered" />   <!-- filtered cloud -->
+  <arg name="raw_lidar_topic" default="/rslidar_points" />         <!-- merged dual-LiDAR -->
+  <arg name="imu_topic"      default="/imu/data" />
+  <arg name="odom_topic"     default="/odom" />
+
+  <arg name="use_imu"        default="true" />
+  <arg name="use_ekf"        default="true" />
+  <arg name="use_filter"     default="true" />
+  <arg name="use_correction" default="true" />
+  <arg name="use_global_localization" default="true" />
+  <!-- false: LiDAR 드라이버/합산이 이미 외부에서 실행 중일 때 -->
+  <arg name="use_lidar_merge" default="true" />
+
+  <arg name="rviz"           default="true" />
+
+  <!-- ===== 0. Dual LiDAR Merge (LiDAR1 + LiDAR2 → /rslidar_points) ===== -->
+  <!--
+    tf_concat_clouds: 두 라이다를 base_link 기준으로 TF 변환 후 합산
+    LiDAR1: /livox/lidar_192_168_1_100
+    LiDAR2: /livox/lidar_192_168_1_101
+    Output: /rslidar_points
+  -->
+  <node if="$(arg use_lidar_merge)"
+        pkg="livox_ros_driver2" type="tf_concat_clouds"
+        name="mid360_tf_concat" output="screen">
+    <remap from="input1" to="/livox/lidar_192_168_1_100" />
+    <remap from="input2" to="/livox/lidar_192_168_1_101" />
+    <param name="target_frame" value="base_link" />
+    <param name="output_topic" value="/rslidar_points" />
+    <param name="slop"         value="0.1" />
+    <param name="queue_size"   value="50" />
+    <param name="tf_timeout"   value="0.2" />
+  </node>
+
+  <!-- ===== 1. Point Cloud Pre-filter ===== -->
+  <node if="$(arg use_filter)"
+        pkg="robot_slam" type="pointcloud_filter_node"
+        name="pointcloud_filter" output="screen">
+    <rosparam file="$(find robot_slam)/config/pointcloud_filter.yaml" command="load" />
+    <param name="input_topic"  value="$(arg raw_lidar_topic)" />
+    <param name="output_topic" value="$(arg points_topic)" />
+  </node>
+
+  <!-- Pass through raw topic if filter is disabled -->
+  <!-- (user should remap manually) -->
+
+  <!-- ===== 2. HDL Global Localization (initial pose) ===== -->
+  <include if="$(arg use_global_localization)"
+           file="$(find hdl_global_localization)/launch/hdl_global_localization.launch" />
+
+  <!-- ===== 3. HDL Localization (NDT pose tracking) ===== -->
+  <include file="$(find robot_slam)/launch/hdl_localization.launch">
+    <arg name="map_pcd"      value="$(arg map_pcd)" />
+    <arg name="points_topic" value="$(arg points_topic)" />
+    <arg name="imu_topic"    value="$(arg imu_topic)" />
+    <arg name="use_imu"      value="$(arg use_imu)" />
+    <arg name="use_global_localization" value="$(arg use_global_localization)" />
+  </include>
+
+  <!-- ===== 4. Pose Correction Node (jump detection + smoothing) ===== -->
+  <node if="$(arg use_correction)"
+        pkg="robot_slam" type="pose_correction_node.py"
+        name="pose_correction" output="screen">
+    <param name="max_position_jump_m"     value="1.5" />
+    <param name="max_yaw_jump_deg"        value="30.0" />
+    <param name="ema_alpha"               value="0.7" />
+    <param name="relocalization_timeout_s" value="5.0" />
+  </node>
+
+  <!-- ===== 5. EKF Sensor Fusion ===== -->
+  <group if="$(arg use_ekf)">
+    <include file="$(find robot_slam)/launch/robot_localization.launch">
+      <arg name="odom_topic" value="$(arg odom_topic)" />
+      <arg name="imu_topic"  value="$(arg imu_topic)" />
+    </include>
+  </group>
+
+  <!-- ===== RViz ===== -->
+  <node if="$(arg rviz)"
+        pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find robot_slam)/rviz/slam_localization.rviz" />
+</launch>

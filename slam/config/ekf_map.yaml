@@ -1,0 +1,80 @@
+# ============================================================
+# robot_localization EKF - Map Frame
+# Fuses: HDL Localization pose + IMU
+# Output: map -> odom transform (global position correction)
+# ============================================================
+
+frequency: 20
+sensor_timeout: 0.2
+
+map_frame: map
+odom_frame: odom
+base_link_frame: base_footprint
+world_frame: map       # <-- world_frame=map for global localization
+
+two_d_mode: false      # Full 3D: captures roll/pitch from IMU
+
+publish_tf: true
+print_diagnostics: true
+
+# --- HDL Localization pose (map frame) ---
+# /odom_3d_corrected is nav_msgs/Odometry -> use odom0 (not pose0)
+odom0: /odom_3d_corrected
+# [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+odom0_config: [true,  true,  false,
+               false, false, true,
+               false, false, false,
+               false, false, false,
+               false, false, false]
+odom0_differential: false
+odom0_relative: false
+odom0_queue_size: 5
+odom0_rejection_threshold: 2.0
+
+# --- IMU (VectorNav) ---
+# Provides: orientation (roll, pitch, yaw) + angular velocity
+imu0: /imu/data
+imu0_config: [false, false, false,
+              true,  true,  true,    # orientation: roll, pitch, yaw
+              false, false, false,
+              true,  true,  true,    # angular velocity
+              false, false, false]
+imu0_differential: false
+imu0_remove_gravitational_acceleration: true
+imu0_queue_size: 10
+imu0_rejection_threshold: 2.0
+
+# --- Process noise (how much we trust the motion model) ---
+# Larger = trust measurements more, smaller = smoother but slower to correct
+# [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+process_noise_covariance: [0.05,  0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0.05,  0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0.06,  0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0.03,  0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0.03,  0,     0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0.03,  0,      0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0.025,  0,      0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0.025,  0,     0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0.04,  0,     0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0.01,  0,     0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0.01,  0,     0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0.02,  0,     0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0.01,  0,     0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0.01,  0,
+                           0,     0,     0,     0,     0,     0,     0,      0,      0,     0,     0,     0,     0,     0,     0.015]
+
+initial_estimate_covariance: [1e-3, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    1e-3, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    1e-3, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    1e-3, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    1e-3, 0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    1e-3, 0,    0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    1e-3, 0,    0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    1e-3, 0,    0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    1e-3, 0,    0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-3, 0,    0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-3, 0,    0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-3, 0,    0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-3, 0,    0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-3, 0,
+                              0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1e-3]
