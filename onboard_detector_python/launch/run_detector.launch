@@ -1,0 +1,12 @@
+<launch>
+    <rosparam file="$(find onboard_detector_python)/cfg/detector_param.yaml" ns="/onboard_detector" />
+    <node pkg="onboard_detector_python" type="detector_node.py" name="detector_node"
+          output="screen"
+          launch-prefix="$(find onboard_detector_python)/.env/bin/python3" />
+    <!-- YOLO v11 detector (yolo26n + TensorRT) -->
+    <node pkg="onboard_detector_python" type="yolov11_detector_node.py"
+          name="yolov11_detector_node" output="screen"
+          launch-prefix="$(find onboard_detector_python)/.env/bin/python3" />
+    <!-- <node name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find onboard_detector_python)/rviz/detector_lv.rviz"/> -->
+</launch>
