@@ -1,2 +1,9 @@
 .env
 *.pt
+*.pth
+*.bag
+*.pcd
+*.onnx
+*.engine
+*.pyc
+__pycache__/
