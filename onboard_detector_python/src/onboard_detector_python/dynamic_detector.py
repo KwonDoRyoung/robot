@@ -11,6 +11,7 @@ import threading
 import random
 from collections import deque
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import cv2
@@ -270,24 +271,25 @@ class DynamicDetector:
     # ------------------------------------------------------------------
 
     def _register_callback(self):
-        depth_sub = message_filters.Subscriber(self.depth_topic, Image, queue_size=50)
-        lidar_sub = message_filters.Subscriber(self.lidar_topic, PointCloud2, queue_size=50)
+        # queue_size=1: 최신 프레임만 유지, 구 프레임 즉시 드롭 → 지연 제거
+        depth_sub = message_filters.Subscriber(self.depth_topic, Image, queue_size=1)
+        lidar_sub = message_filters.Subscriber(self.lidar_topic, PointCloud2, queue_size=1)
 
         if self.localization_mode == 0:
-            pose_sub = message_filters.Subscriber(self.pose_topic, PoseStamped, queue_size=25)
+            pose_sub = message_filters.Subscriber(self.pose_topic, PoseStamped, queue_size=2)
             depth_pose_sync = message_filters.ApproximateTimeSynchronizer(
-                [depth_sub, pose_sub], queue_size=100, slop=0.05)
+                [depth_sub, pose_sub], queue_size=2, slop=0.1)
             depth_pose_sync.registerCallback(self._depth_pose_cb)
             lidar_pose_sync = message_filters.ApproximateTimeSynchronizer(
-                [lidar_sub, pose_sub], queue_size=100, slop=0.05)
+                [lidar_sub, pose_sub], queue_size=2, slop=0.1)
             lidar_pose_sync.registerCallback(self._lidar_pose_cb)
         elif self.localization_mode == 1:
-            odom_sub = message_filters.Subscriber(self.odom_topic, Odometry, queue_size=25)
+            odom_sub = message_filters.Subscriber(self.odom_topic, Odometry, queue_size=2)
             depth_odom_sync = message_filters.ApproximateTimeSynchronizer(
-                [depth_sub, odom_sub], queue_size=100, slop=0.05)
+                [depth_sub, odom_sub], queue_size=2, slop=0.1)
             depth_odom_sync.registerCallback(self._depth_odom_cb)
             lidar_odom_sync = message_filters.ApproximateTimeSynchronizer(
-                [lidar_sub, odom_sub], queue_size=100, slop=0.05)
+                [lidar_sub, odom_sub], queue_size=2, slop=0.1)
             lidar_odom_sync.registerCallback(self._lidar_odom_cb)
         else:
             rospy.logerr(f"{self.HINT}: Invalid localization mode!")
@@ -297,12 +299,12 @@ class DynamicDetector:
         rospy.Subscriber(self.color_img_topic, Image, self._color_img_cb,
                          queue_size=1, buff_size=2**24)
         rospy.Subscriber("yolo_detector/detected_bounding_boxes", Detection2DArray,
-                         self._yolo_detection_cb, queue_size=10)
+                         self._yolo_detection_cb, queue_size=1)  # 최신 detection만
 
-        # Timers — 역할별로 주기 분리
-        det_dur   = rospy.Duration(self.dt)                          # 30 Hz (detection)
-        track_dur = rospy.Duration(self._gp("tracking_time_step", 0.05))  # 20 Hz
-        vis_dur   = rospy.Duration(self._gp("vis_time_step", 0.1))        # 10 Hz
+        # Timers — 타이머 주기를 실제 처리 시간에 맞춤 (30Hz 타이머가 1.4s 콜백 쌓는 문제 제거)
+        det_dur   = rospy.Duration(self.dt)
+        track_dur = rospy.Duration(self._gp("tracking_time_step", 0.05))
+        vis_dur   = rospy.Duration(self._gp("vis_time_step", 0.1))
         rospy.Timer(det_dur,   self._detection_cb)
         rospy.Timer(det_dur,   self._lidar_detection_cb)
         rospy.Timer(track_dur, self._tracking_cb)
@@ -398,9 +400,9 @@ class DynamicDetector:
         self.latest_cloud_msg = cloud_msg
         self.has_sensor_pose = True
 
-        # Read points from ROS message
-        pts_gen = pc2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
-        pts = np.array(list(pts_gen), dtype=np.float32)
+        # Read points from ROS message (list() 변환 제거 → structured array 직접 변환)
+        pts_raw = pc2.read_points_numpy(cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
+        pts = pts_raw.view(np.float32).reshape(-1, 3) if pts_raw.dtype.names else pts_raw.astype(np.float32)
         if pts.size == 0:
             self.lidar_cloud_pts = np.zeros((0, 3))
             return
@@ -429,35 +431,21 @@ class DynamicDetector:
                   (pts_world[:, 2] <= self.roof_height))
         pts_world = pts_world[mask_z]
 
-        # Voxel downsampling via numpy unique
+        # Voxel downsampling — Python dict 루프 제거, numpy로 완전 벡터화
         if len(pts_world) > 0:
             leaf = 0.1
-            voxel_idx = np.floor(pts_world / leaf).astype(np.int32)
-            _, inv, counts = np.unique(voxel_idx, axis=0, return_inverse=True, return_counts=True)
-            # Adaptive leaf size if too many points
+            # Adaptive leaf size
             while len(pts_world) > self.down_sample_thresh and leaf <= 2.0:
                 leaf *= 1.1
                 voxel_idx = np.floor(pts_world / leaf).astype(np.int32)
-                _, inv, counts = np.unique(voxel_idx, axis=0, return_inverse=True, return_counts=True)
-                # keep first representative point per voxel
-                keep = np.zeros(len(pts_world), dtype=bool)
-                first_occurrence = {}
-                for k, vi in enumerate(inv):
-                    if vi not in first_occurrence:
-                        first_occurrence[vi] = k
-                        keep[k] = True
-                pts_world = pts_world[keep]
+                # np.unique의 return_index로 첫 번째 포인트만 선택 (dict 루프 완전 대체)
+                _, first_idx = np.unique(voxel_idx, axis=0, return_index=True)
+                pts_world = pts_world[np.sort(first_idx)]
 
-            # Final: keep one representative per voxel
-            keep = np.zeros(len(pts_world), dtype=bool)
-            voxel_idx2 = np.floor(pts_world / leaf).astype(np.int32)
-            _, inv2 = np.unique(voxel_idx2, axis=0, return_inverse=True)
-            first_seen = {}
-            for k, vi in enumerate(inv2):
-                if vi not in first_seen:
-                    first_seen[vi] = k
-                    keep[k] = True
-            pts_world = pts_world[keep]
+            # 최종 voxel 대표점
+            voxel_idx = np.floor(pts_world / leaf).astype(np.int32)
+            _, first_idx = np.unique(voxel_idx, axis=0, return_index=True)
+            pts_world = pts_world[np.sort(first_idx)]
 
         self.lidar_cloud_pts = pts_world
 
@@ -511,9 +499,14 @@ class DynamicDetector:
             yolo           = self.yolo_detections
 
         # -- lock 없이 무거운 연산 수행 (numpy/GPU가 GIL 해제) --
-        db_bboxes, pc_vis, pc_centers, pc_stds = self._dbscan_detect_pure(
-            depth_img, pos_depth, ori_depth, pos_body)
-        uv_bboxes = self._uv_detect_pure(depth_img, pos_depth, ori_depth)
+        # dbscan과 uv_detect는 독립적이므로 병렬 실행
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            _db_fut = _ex.submit(self._dbscan_detect_pure,
+                                 depth_img, pos_depth, ori_depth, pos_body)
+            _uv_fut = _ex.submit(self._uv_detect_pure,
+                                 depth_img, pos_depth, ori_depth)
+            db_bboxes, pc_vis, pc_centers, pc_stds = _db_fut.result()
+            uv_bboxes = _uv_fut.result()
         (filtered_before_yolo, filtered,
          filtered_clusters, filtered_centers, filtered_stds,
          visual_bboxes) = self._filter_lv_bboxes_pure(
