@@ -598,9 +598,9 @@ class DynamicDetector:
             dynamic_pts = self._get_dynamic_pc()
             self._publish_np_pointcloud(np.array(dynamic_pts) if dynamic_pts else np.zeros((0, 3)),
                                         self._pub_dynamic_pts, "map")
-            self._publish_np_pointcloud(
-                np.array(self.filtered_depth_points) if self.filtered_depth_points else np.zeros((0, 3)),
-                self._pub_filtered_depth_pts, "map")
+            _fdp = self.filtered_depth_points
+            _fdp_arr = (_fdp if isinstance(_fdp, np.ndarray) else np.array(_fdp)) if len(_fdp) > 0 else np.zeros((0, 3))
+            self._publish_np_pointcloud(_fdp_arr, self._pub_filtered_depth_pts, "map")
             self._publish_raw_dynamic_points()
             self._publish_history_traj()
             self._publish_vel_vis()
