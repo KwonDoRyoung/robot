@@ -576,28 +576,44 @@ class DynamicDetector:
             self._classify()
 
     def _vis_cb(self, event):
+        # lock은 데이터 스냅샷에만 사용 → publish/직렬화 등 무거운 작업은 lock 밖에서
         with self._lock:
-            self._publish_uv_images()
-            self._publish_color_images()
-            self._publish_3d_box(self.uv_bboxes, self._pub_uv_bboxes, 0, 1, 0)
-            self._publish_3d_box(self.db_bboxes, self._pub_db_bboxes, 1, 0, 0)
-            self._publish_3d_box(self.visual_bboxes, self._pub_visual_bboxes, 0.3, 0.8, 1.0)
-            self._publish_3d_box(self.lidar_bboxes, self._pub_lidar_bboxes, 0.5, 0.5, 0.5)
-            self._publish_3d_box(self.filtered_bboxes_before_yolo, self._pub_filtered_before_yolo, 0, 1, 0.5)
-            self._publish_3d_box(self.filtered_bboxes, self._pub_filtered_bboxes, 0, 1, 1)
-            self._publish_3d_box(self.tracked_bboxes, self._pub_tracked_bboxes, 1, 1, 0)
-            self._publish_3d_box(self.dynamic_bboxes, self._pub_dynamic_bboxes, 0, 0, 1)
-            self._publish_lidar_clusters()
-            self._publish_filtered_points()
-            dynamic_pts = self._get_dynamic_pc()
-            self._publish_np_pointcloud(np.array(dynamic_pts) if dynamic_pts else np.zeros((0, 3)),
-                                        self._pub_dynamic_pts, "map")
-            _fdp = self.filtered_depth_points
-            _fdp_arr = (_fdp if isinstance(_fdp, np.ndarray) else np.array(_fdp)) if len(_fdp) > 0 else np.zeros((0, 3))
-            self._publish_np_pointcloud(_fdp_arr, self._pub_filtered_depth_pts, "map")
-            self._publish_raw_dynamic_points()
-            self._publish_history_traj()
-            self._publish_vel_vis()
+            _uv_det        = self._uv_detector
+            _color_img     = self.detected_color_image
+            _uv_bboxes     = list(self.uv_bboxes)
+            _db_bboxes     = list(self.db_bboxes)
+            _vis_bboxes    = list(self.visual_bboxes)
+            _lidar_bboxes  = list(self.lidar_bboxes)
+            _fby_bboxes    = list(self.filtered_bboxes_before_yolo)
+            _filt_bboxes   = list(self.filtered_bboxes)
+            _track_bboxes  = list(self.tracked_bboxes)
+            _dyn_bboxes    = list(self.dynamic_bboxes)
+            _lidar_clust   = list(self.lidar_clusters)
+            _filt_clust    = list(self.filtered_pc_clusters)
+            _fdp           = self.filtered_depth_points
+            _fdp_arr       = (_fdp if isinstance(_fdp, np.ndarray) else np.array(_fdp)) if len(_fdp) > 0 else np.zeros((0, 3))
+            _dyn_bboxes_snap = list(self.dynamic_bboxes)
+
+        # -- lock 밖에서 publish (느린 직렬화/포인트클라우드 변환 포함) --
+        self._publish_uv_images_snap(_uv_det)
+        self._publish_color_images_snap(_color_img)
+        self._publish_3d_box(_uv_bboxes,   self._pub_uv_bboxes,           0, 1, 0)
+        self._publish_3d_box(_db_bboxes,   self._pub_db_bboxes,           1, 0, 0)
+        self._publish_3d_box(_vis_bboxes,  self._pub_visual_bboxes,       0.3, 0.8, 1.0)
+        self._publish_3d_box(_lidar_bboxes,self._pub_lidar_bboxes,        0.5, 0.5, 0.5)
+        self._publish_3d_box(_fby_bboxes,  self._pub_filtered_before_yolo,0, 1, 0.5)
+        self._publish_3d_box(_filt_bboxes, self._pub_filtered_bboxes,     0, 1, 1)
+        self._publish_3d_box(_track_bboxes,self._pub_tracked_bboxes,      1, 1, 0)
+        self._publish_3d_box(_dyn_bboxes,  self._pub_dynamic_bboxes,      0, 0, 1)
+        self._publish_lidar_clusters_snap(_lidar_clust)
+        self._publish_filtered_points_snap(_filt_clust)
+        dynamic_pts = self._get_dynamic_pc_snap(_filt_clust, _dyn_bboxes_snap)
+        self._publish_np_pointcloud(np.array(dynamic_pts) if dynamic_pts else np.zeros((0, 3)),
+                                    self._pub_dynamic_pts, "map")
+        self._publish_np_pointcloud(_fdp_arr, self._pub_filtered_depth_pts, "map")
+        self._publish_raw_dynamic_points()
+        self._publish_history_traj()
+        self._publish_vel_vis()
 
     # ------------------------------------------------------------------
     # Service handler
@@ -1772,6 +1788,89 @@ class DynamicDetector:
             vel_msg.markers.append(vm)
         self._pub_vel_vis.publish(vel_msg)
 
+    # -- snapshot 버전: lock 밖에서 호출, 인수로 데이터를 받음 --
+    def _publish_uv_images_snap(self, uv_det):
+        if uv_det is None:
+            return
+        try:
+            now = rospy.Time.now()
+            if hasattr(uv_det, 'depth_show') and uv_det.depth_show is not None:
+                msg = self._bridge.cv2_to_imgmsg(uv_det.depth_show, encoding="bgr8")
+                msg.header.stamp = now
+                self._pub_uv_depth.publish(msg)
+            if hasattr(uv_det, 'U_map_show') and uv_det.U_map_show is not None:
+                msg = self._bridge.cv2_to_imgmsg(uv_det.U_map_show, encoding="bgr8")
+                msg.header.stamp = now
+                self._pub_u_depth.publish(msg)
+            if hasattr(uv_det, 'bird_view') and uv_det.bird_view is not None:
+                msg = self._bridge.cv2_to_imgmsg(uv_det.bird_view, encoding="bgr8")
+                msg.header.stamp = now
+                self._pub_uv_bird.publish(msg)
+        except Exception:
+            pass
+
+    def _publish_color_images_snap(self, color_img):
+        if color_img is None:
+            return
+        try:
+            msg = self._bridge.cv2_to_imgmsg(color_img, encoding="rgb8")
+            msg.header.stamp = rospy.Time.now()
+            self._pub_color_img.publish(msg)
+        except Exception:
+            pass
+
+    def _publish_lidar_clusters_snap(self, lidar_clusters):
+        pts_xyzrgb = []
+        for cluster in lidar_clusters:
+            random.seed(cluster.cluster_id)
+            rc = random.random(); gc = random.random(); bc = random.random()
+            for pt in cluster.points:
+                pts_xyzrgb.append((pt[0], pt[1], pt[2], rc, gc, bc))
+        if not pts_xyzrgb:
+            return
+        header = Header(frame_id="map", stamp=rospy.Time.now())
+        fields = [
+            pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('r', 12, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('g', 16, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('b', 20, pc2.PointField.FLOAT32, 1),
+        ]
+        self._pub_lidar_clusters.publish(pc2.create_cloud(header, fields, pts_xyzrgb))
+
+    def _publish_filtered_points_snap(self, filtered_pc_clusters):
+        pts_xyzrgb = []
+        for cluster in filtered_pc_clusters:
+            for pt in cluster:
+                pts_xyzrgb.append((float(pt[0]), float(pt[1]), float(pt[2]), 0.5, 0.5, 0.5))
+        if not pts_xyzrgb:
+            return
+        header = Header(frame_id="map", stamp=rospy.Time.now())
+        fields = [
+            pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('r', 12, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('g', 16, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('b', 20, pc2.PointField.FLOAT32, 1),
+        ]
+        self._pub_filtered_pts.publish(pc2.create_cloud(header, fields, pts_xyzrgb))
+
+    def _get_dynamic_pc_snap(self, filtered_pc_clusters, dynamic_bboxes):
+        dynamic_pts = []
+        for cluster in filtered_pc_clusters:
+            for pt in cluster:
+                p = np.array(pt)
+                for db in dynamic_bboxes:
+                    if (abs(p[0] - db.x) <= db.x_width/2 and
+                            abs(p[1] - db.y) <= db.y_width/2 and
+                            abs(p[2] - db.z) <= db.z_width/2):
+                        dynamic_pts.append(p)
+                        break
+        return dynamic_pts
+
+    # -- 기존 함수 (lock 안에서 호출되던 버전, 다른 곳 참조용으로 유지) --
     def _publish_lidar_clusters(self):
         pts_xyzrgb = []
         for cluster in self.lidar_clusters:
