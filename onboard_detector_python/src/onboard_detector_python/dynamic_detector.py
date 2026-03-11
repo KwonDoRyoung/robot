@@ -180,7 +180,7 @@ class DynamicDetector:
 
         # Sensor ranges
         self.local_sensor_range = np.array([5.0, 5.0, 5.0])
-        self.local_lidar_range = np.array([10.0, 10.0, 5.0])
+        self.local_lidar_range = np.array([0.0, 10.0, 2.0])
 
         # State variables
         self.depth_image = None               # np.ndarray uint16
@@ -408,10 +408,8 @@ class DynamicDetector:
             self.lidar_cloud_pts = np.zeros((0, 3))
             return
 
-        # X/Y range filter (local sensor range)
-        rx, ry = self.local_lidar_range[0], self.local_lidar_range[1]
-        mask = ((pts[:, 0] >= -rx) & (pts[:, 0] <= rx) &
-                (pts[:, 1] >= -ry) & (pts[:, 1] <= ry))
+        # ROI filter (base_link frame): x >= 0, 0.3 <= z <= 2.0
+        mask = (pts[:, 0] >= 0.0) & (pts[:, 2] >= 0.3) & (pts[:, 2] <= 2.0)
         pts = pts[mask]
 
         # Gaussian probability downsampling
@@ -451,7 +449,7 @@ class DynamicDetector:
         self.lidar_cloud_pts = pts_world
 
         # Publish downsampled cloud for visualization
-        self._publish_np_pointcloud(pts_world, self._pub_downsample_pts, "map")
+        self._publish_np_pointcloud(pts_world, self._pub_downsample_pts, "base_link")
 
         # Store lidar sensor pose
         lidar_mat2 = self._get_lidar_pose(pos, quat)
@@ -609,8 +607,8 @@ class DynamicDetector:
         self._publish_filtered_points_snap(_filt_clust)
         dynamic_pts = self._get_dynamic_pc_snap(_filt_clust, _dyn_bboxes_snap)
         self._publish_np_pointcloud(np.array(dynamic_pts) if dynamic_pts else np.zeros((0, 3)),
-                                    self._pub_dynamic_pts, "map")
-        self._publish_np_pointcloud(_fdp_arr, self._pub_filtered_depth_pts, "map")
+                                    self._pub_dynamic_pts, "base_link")
+        self._publish_np_pointcloud(_fdp_arr, self._pub_filtered_depth_pts, "base_link")
         self._publish_raw_dynamic_points()
         self._publish_history_traj()
         self._publish_vel_vis()
@@ -1699,7 +1697,7 @@ class DynamicDetector:
         now = rospy.Time.now()
         for i, box in enumerate(boxes):
             line = Marker()
-            line.header.frame_id = "map"
+            line.header.frame_id = "base_link"
             line.header.stamp = now
             line.ns = "box3D"
             line.id = i
@@ -1751,7 +1749,7 @@ class DynamicDetector:
             if len(bh) <= 1:
                 continue
             traj = Marker()
-            traj.header.frame_id = "map"
+            traj.header.frame_id = "base_link"
             traj.header.stamp = rospy.Time.now()
             traj.ns = "dynamic_detector"
             traj.id = count
@@ -1772,7 +1770,7 @@ class DynamicDetector:
         vel_msg = MarkerArray()
         for i, tb in enumerate(self.tracked_bboxes):
             vm = Marker()
-            vm.header.frame_id = "map"
+            vm.header.frame_id = "base_link"
             vm.header.stamp = rospy.Time.now()
             vm.ns = "dynamic_detector"
             vm.id = i
@@ -1828,7 +1826,7 @@ class DynamicDetector:
                 pts_xyzrgb.append((pt[0], pt[1], pt[2], rc, gc, bc))
         if not pts_xyzrgb:
             return
-        header = Header(frame_id="map", stamp=rospy.Time.now())
+        header = Header(frame_id="base_link", stamp=rospy.Time.now())
         fields = [
             pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
             pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
@@ -1846,7 +1844,7 @@ class DynamicDetector:
                 pts_xyzrgb.append((float(pt[0]), float(pt[1]), float(pt[2]), 0.5, 0.5, 0.5))
         if not pts_xyzrgb:
             return
-        header = Header(frame_id="map", stamp=rospy.Time.now())
+        header = Header(frame_id="base_link", stamp=rospy.Time.now())
         fields = [
             pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
             pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
@@ -1880,7 +1878,7 @@ class DynamicDetector:
                 pts_xyzrgb.append((pt[0], pt[1], pt[2], rc, gc, bc))
         if not pts_xyzrgb:
             return
-        header = Header(frame_id="map", stamp=rospy.Time.now())
+        header = Header(frame_id="base_link", stamp=rospy.Time.now())
         fields = [
             pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
             pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
@@ -1899,7 +1897,7 @@ class DynamicDetector:
                 pts_xyzrgb.append((float(pt[0]), float(pt[1]), float(pt[2]), 0.5, 0.5, 0.5))
         if not pts_xyzrgb:
             return
-        header = Header(frame_id="map", stamp=rospy.Time.now())
+        header = Header(frame_id="base_link", stamp=rospy.Time.now())
         fields = [
             pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
             pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
@@ -1924,7 +1922,7 @@ class DynamicDetector:
                 t = self.position_lidar
                 global_pts = (R @ pts.T).T + t
                 # publish raw lidar
-                self._publish_np_pointcloud(global_pts, self._pub_raw_lidar_pts, "map")
+                self._publish_np_pointcloud(global_pts, self._pub_raw_lidar_pts, "base_link")
             else:
                 global_pts = pts
 
@@ -1941,7 +1939,7 @@ class DynamicDetector:
                 dyn_pts.extend(global_pts[mask].tolist())
 
             if dyn_pts:
-                self._publish_np_pointcloud(np.array(dyn_pts), self._pub_raw_dynamic_pts, "map")
+                self._publish_np_pointcloud(np.array(dyn_pts), self._pub_raw_dynamic_pts, "base_link")
         except Exception as e:
             rospy.logerr(f"publishRawDynamicPoints error: {e}")
 
