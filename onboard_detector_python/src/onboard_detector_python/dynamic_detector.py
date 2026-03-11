@@ -400,9 +400,10 @@ class DynamicDetector:
         self.latest_cloud_msg = cloud_msg
         self.has_sensor_pose = True
 
-        # Read points from ROS message (list() 변환 제거 → structured array 직접 변환)
-        pts_raw = pc2.read_points_numpy(cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
-        pts = pts_raw.view(np.float32).reshape(-1, 3) if pts_raw.dtype.names else pts_raw.astype(np.float32)
+        # Read points from ROS message (ROS Noetic: read_points_numpy 없음 → structured array 변환)
+        pts_gen = pc2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
+        pts_raw = np.array(list(pts_gen), dtype=np.float32)
+        pts = pts_raw.reshape(-1, 3) if pts_raw.size > 0 else pts_raw
         if pts.size == 0:
             self.lidar_cloud_pts = np.zeros((0, 3))
             return
