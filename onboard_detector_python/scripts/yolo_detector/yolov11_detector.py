@@ -2,7 +2,15 @@
 import rospy
 import cv2
 import numpy as np
+# [Fix 1] TensorRT Python 바인딩이 np.bool(NumPy 1.24에서 삭제)을 사용하므로 패치
+if not hasattr(np, 'bool'):
+    np.bool = bool
+if not hasattr(np, 'int'):
+    np.int = int
+if not hasattr(np, 'float'):
+    np.float = float
 import torch
+import threading
 import os
 import std_msgs
 from sensor_msgs.msg import Image
@@ -21,8 +29,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 def _find_weight():
     candidates = [
         os.path.join(path_curr, "weights/yolo26n.engine"),
-        os.path.join(path_curr, "weights/yolo26n.pt"),
-        os.path.join(path_curr, "weights/yolo11n.pt"),
     ]
     for c in candidates:
         if os.path.isfile(c):
@@ -48,12 +54,17 @@ class yolo_detector:
             with open(names_path, 'r') as f:
                 self.LABEL_NAMES = [l.strip() for l in f.readlines()]
 
+        # [Fix 2] Lock — image_callback(subscriber), detect/vis/bbox(timer) 간 race condition 방지
+        self._img_lock = threading.Lock()
+        self._det_lock = threading.Lock()
+
         # 모델 로드 (TensorRT engine 또는 pt)
         weight = _find_weight()
         self.use_engine = weight.endswith(".engine")
-        self.model = YOLO(weight)
+        # [Fix 3] .engine은 task 자동 감지 불가 → 명시
+        self.model = YOLO(weight, task='detect')
         if not self.use_engine:
-            self.model.eval()
+            self.model.model.eval()
 
         # CUDA JIT warmup (첫 추론이 수십 초 걸리는 것 방지)
         print("[YOLO] Warming up model...")
@@ -78,29 +89,30 @@ class yolo_detector:
         rospy.Timer(rospy.Duration(det_hz), self.bbox_callback)
 
     def image_callback(self, msg):
-        self.img = self.br.imgmsg_to_cv2(msg, "bgr8")
-        self.img_received = True
+        img = self.br.imgmsg_to_cv2(msg, "bgr8")
+        with self._img_lock:
+            self.img = img
+            self.img_received = True
 
     def detect_callback(self, event):
-        if not self.img_received:
-            return
+        with self._img_lock:
+            if not self.img_received:
+                return
+            img = self.img.copy()
         startTime = rospy.Time.now()
-        img = self.img.copy()
         output = self.inference(img)
-        self.detected_img, self.detected_bboxes = self.postprocess(img, output)
-        self.img_detected = True
+        det_img, det_bboxes = self.postprocess(img, output)
+        with self._det_lock:
+            self.detected_img = det_img
+            self.detected_bboxes = det_bboxes
+            self.img_detected = True
         self.time_pub.publish((rospy.Time.now() - startTime).to_sec())
 
-    def vis_callback(self, event):
-        if self.img_detected and self.detected_img is not None:
-            self.img_pub.publish(self.br.cv2_to_imgmsg(self.detected_img, "bgr8"))
-
-    def bbox_callback(self, event):
-        if not self.img_detected:
-            return
+        # detect 직후 publish → 별도 타이머 불필요, 동기화 보장
+        self.img_pub.publish(self.br.cv2_to_imgmsg(det_img, "bgr8"))
         bboxes_msg = Detection2DArray()
         bboxes_msg.header.stamp = rospy.Time.now()
-        for detected_box in self.detected_bboxes:
+        for detected_box in det_bboxes:
             if detected_box[4] in target_classes:
                 bbox_msg = Detection2D()
                 bbox_msg.bbox.center.x = int(detected_box[0])
@@ -109,6 +121,14 @@ class yolo_detector:
                 bbox_msg.bbox.size_y = abs(detected_box[3] - detected_box[1])
                 bboxes_msg.detections.append(bbox_msg)
         self.bbox_pub.publish(bboxes_msg)
+
+    def vis_callback(self, event):
+        # detect_callback에서 publish하므로 유지하되 중복 방지용으로 비워둠
+        pass
+
+    def bbox_callback(self, event):
+        # detect_callback에서 publish하므로 유지하되 중복 방지용으로 비워둠
+        pass
 
     def inference(self, ori_img):
         # ultralytics가 내부적으로 전처리/추론 수행 (imgsz=640으로 고정)

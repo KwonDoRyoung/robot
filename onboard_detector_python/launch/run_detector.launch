@@ -1,12 +1,17 @@
 <launch>
     <rosparam file="$(find onboard_detector_python)/cfg/detector_param.yaml" ns="/onboard_detector" />
+
     <node pkg="onboard_detector_python" type="detector_node.py" name="detector_node"
           output="screen"
-          launch-prefix="$(find onboard_detector_python)/.env/bin/python3" />
+          launch-prefix="$(find onboard_detector_python)/.env/bin/python3">
+        <env name="LD_PRELOAD" value="/usr/lib/aarch64-linux-gnu/libgomp.so.1:/home/irop/projects/robot/onboard_detector_python/.env/lib/python3.8/site-packages/torch.libs/libgomp-804f19d4.so.1.0.0" />
+    </node>
     <!-- YOLO v11 detector (yolo26n + TensorRT) -->
     <node pkg="onboard_detector_python" type="yolov11_detector_node.py"
           name="yolov11_detector_node" output="screen"
-          launch-prefix="$(find onboard_detector_python)/.env/bin/python3" />
+          launch-prefix="$(find onboard_detector_python)/.env/bin/python3">
+        <env name="LD_PRELOAD" value="/usr/lib/aarch64-linux-gnu/libgomp.so.1:/home/irop/projects/robot/onboard_detector_python/.env/lib/python3.8/site-packages/torch.libs/libgomp-804f19d4.so.1.0.0" />
+    </node>
     <!-- <node name="rviz" pkg="rviz" type="rviz"
           args="-d $(find onboard_detector_python)/rviz/detector_lv.rviz"/> -->
 </launch>
