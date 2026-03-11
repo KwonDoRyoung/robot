@@ -29,12 +29,18 @@ class yolo_detector:
 
         self.img_received = False
         self.img_detected = False
-
+        self.img_new = False  # 새 이미지가 들어왔는지 추적
 
         # init and load
         self.model = Detector(80, True).to(device)
         self.model.load_state_dict(torch.load(os.path.join(path_curr, weight), map_location=device))
         self.model.eval()
+
+        # class names 한 번만 로드
+        self.LABEL_NAMES = []
+        with open(os.path.join(path_curr, class_names), 'r') as f:
+            for line in f.readlines():
+                self.LABEL_NAMES.append(line.strip())
 
         # subscriber
         self.br = CvBridge()
@@ -45,43 +51,42 @@ class yolo_detector:
         self.bbox_pub = rospy.Publisher("yolo_detector/detected_bounding_boxes", Detection2DArray, queue_size=10)
         self.time_pub = rospy.Publisher("yolo_detector/yolo_time", std_msgs.msg.Float64, queue_size=1)
 
-        # timer
+        # timer: detect_callback 하나로 통합 (vis, bbox 포함)
         rospy.Timer(rospy.Duration(0.033), self.detect_callback)
-        rospy.Timer(rospy.Duration(0.033), self.vis_callback)
-        rospy.Timer(rospy.Duration(0.033), self.bbox_callback)
     
     def image_callback(self, msg):
         self.img = self.br.imgmsg_to_cv2(msg, "bgr8")
         self.img_received = True
+        self.img_new = True
 
     def detect_callback(self, event):
+        if not self.img_received or not self.img_new:
+            return
+        self.img_new = False
+
         startTime = rospy.Time.now()
-        if (self.img_received == True):
-            output = self.inference(self.img)
-            self.detected_img, self.detected_bboxes = self.postprocess(self.img, output)
-            self.img_detected = True
+        img_snap = self.img.copy()
+        output = self.inference(img_snap)
+        detected_img, detected_bboxes = self.postprocess(img_snap, output)
+        self.img_detected = True
         endTime = rospy.Time.now()
-        self.time_pub.publish((endTime-startTime).to_sec())
-        
+        self.time_pub.publish((endTime - startTime).to_sec())
 
-    def vis_callback(self, event):
-        if (self.img_detected == True):
-            self.img_pub.publish(self.br.cv2_to_imgmsg(self.detected_img, "bgr8"))
+        # vis
+        self.img_pub.publish(self.br.cv2_to_imgmsg(detected_img, "bgr8"))
 
-    def bbox_callback(self, event):
-        if (self.img_detected == True):
-            bboxes_msg = Detection2DArray()
-            for detected_box in self.detected_bboxes:
-                if (detected_box[4] in target_classes):
-                    bbox_msg = Detection2D()
-                    bbox_msg.bbox.center.x = int(detected_box[0])
-                    bbox_msg.bbox.center.y = int(detected_box[1])
-                    bbox_msg.bbox.size_x = abs(detected_box[2] - detected_box[0]) 
-                    bbox_msg.bbox.size_y = abs(detected_box[3] - detected_box[1])
-
-                    bboxes_msg.detections.append(bbox_msg)
-                bboxes_msg.header.stamp = rospy.Time.now()
-            self.bbox_pub.publish(bboxes_msg)
+        # bbox
+        bboxes_msg = Detection2DArray()
+        bboxes_msg.header.stamp = endTime
+        for detected_box in detected_bboxes:
+            if detected_box[4] in target_classes:
+                bbox_msg = Detection2D()
+                bbox_msg.bbox.center.x = int(detected_box[0])
+                bbox_msg.bbox.center.y = int(detected_box[1])
+                bbox_msg.bbox.size_x = abs(detected_box[2] - detected_box[0])
+                bbox_msg.bbox.size_y = abs(detected_box[3] - detected_box[1])
+                bboxes_msg.detections.append(bbox_msg)
+        self.bbox_pub.publish(bboxes_msg)
 
     def inference(self, ori_img):
         # image pre-processing
@@ -96,11 +101,6 @@ class yolo_detector:
         return output
 
     def postprocess(self, ori_img, output):
-        LABEL_NAMES = []
-        with open(os.path.join(path_curr, class_names), 'r') as f:
-            for line in f.readlines():
-                LABEL_NAMES.append(line.strip())
-        
         H, W, _ = ori_img.shape
         scale_h, scale_w = H / 352., W / 352.
 
@@ -109,7 +109,7 @@ class yolo_detector:
             box = box.tolist()
            
             obj_score = box[4]
-            category = LABEL_NAMES[int(box[5])]
+            category = self.LABEL_NAMES[int(box[5])]
             x1, y1 = int(box[0] * W), int(box[1] * H)
             x2, y2 = int(box[2] * W), int(box[3] * H)
             detected_box = [x1, y1, x2, y2, category]

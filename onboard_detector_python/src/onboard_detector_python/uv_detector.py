@@ -12,6 +12,90 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+try:
+    from numba import njit as _njit
+    _NUMBA_OK = True
+except ImportError:
+    # numba 없으면 no-op decorator
+    # @_njit(cache=True) → _njit(cache=True) 가 decorator 반환 → decorator(fn) = fn
+    def _njit(**kwargs):  # type: ignore[misc]
+        def decorator(fn):
+            return fn
+        return decorator
+    _NUMBA_OK = False
+
+
+@_njit(cache=True)
+def _extract_bb_scan(u_map, u_min, min_length_line, threshold_line):
+    """
+    U_map을 행 단위로 스캔해 세그먼트를 찾고 union-find로 연결.
+    반환: mask, seg_row, seg_left, seg_right, seg_parent (모두 numpy array)
+    """
+    rows, cols = u_map.shape
+    mask = np.zeros((rows, cols), dtype=np.int32)
+
+    MAX_SEGS = 4096
+    seg_row    = np.zeros(MAX_SEGS, dtype=np.int32)
+    seg_left   = np.zeros(MAX_SEGS, dtype=np.int32)
+    seg_right  = np.zeros(MAX_SEGS, dtype=np.int32)
+    seg_parent = np.zeros(MAX_SEGS, dtype=np.int32)
+    n = 0
+
+    for row in range(rows):
+        sum_line    = 0
+        max_line    = 0
+        length_line = 0
+
+        col = 0
+        while col <= cols:
+            val = int(u_map[row, col]) if col < cols else 0
+
+            if col < cols and val >= u_min:
+                length_line += 1
+                sum_line    += val
+                if val > max_line:
+                    max_line = val
+
+            if val < u_min or col == cols - 1:
+                end_col = col + 1 if col == cols - 1 else col
+
+                if length_line > min_length_line and sum_line > threshold_line * max_line:
+                    seg_id = n + 1
+                    s = end_col - length_line
+                    e = end_col - 1
+
+                    seg_row[n]    = row
+                    seg_left[n]   = s
+                    seg_right[n]  = e
+                    seg_parent[n] = seg_id
+
+                    for c in range(s, e):
+                        mask[row, c] = seg_id
+
+                    if row != 0:
+                        for c in range(s, min(e, cols)):
+                            prev_id = mask[row - 1, c]
+                            if prev_id != 0:
+                                prev_par = seg_parent[prev_id - 1]
+                                curr_par = seg_parent[n]
+                                if prev_par < curr_par:
+                                    seg_parent[n] = prev_par
+                                else:
+                                    for b in range(n + 1):
+                                        if seg_parent[b] == prev_par:
+                                            seg_parent[b] = curr_par
+                                break  # 첫 번째 연결만 처리
+
+                    n += 1
+
+                sum_line    = 0
+                max_line    = 0
+                length_line = 0
+
+            col += 1
+
+    return mask, seg_row[:n], seg_left[:n], seg_right[:n], seg_parent[:n]
+
 from onboard_detector_python.utils import Box3D
 from onboard_detector_python.kalman_filter import KalmanFilter
 
@@ -322,84 +406,101 @@ class UVdetector:
         self.depth_low_res = depth_low_res_temp
 
         # U_map: 각 (bin, col) 에 valid 픽셀 수 집계
+        # np.add.at는 GIL-holding scalar loop → bincount로 교체 (수배 빠름)
         rows_arr, cols_arr = np.where(valid)
         bins_arr = bin_idx[rows_arr, cols_arr]
-        u_map = np.zeros((hist_size, depth_rescale.shape[1]), dtype=np.int32)
-        np.add.at(u_map, (bins_arr, cols_arr), 1)
+        flat_idx = bins_arr * depth_rescale.shape[1] + cols_arr
+        u_map_flat = np.bincount(flat_idx, minlength=hist_size * depth_rescale.shape[1])
+        u_map = u_map_flat.reshape(hist_size, depth_rescale.shape[1]).astype(np.int32)
         self.U_map = np.clip(u_map, 0, 255).astype(np.uint8)
 
         # U-map 평활화
         self.U_map = cv2.GaussianBlur(self.U_map, (5, 9), 10, 10)
 
     def extract_bb(self):
-        """C++ extract_bb() 완전 동일 — 커스텀 연결 컴포넌트 방식"""
-        rows, cols = self.U_map.shape
-        mask = [[0] * cols for _ in range(rows)]
+        """C++ extract_bb() 완전 동일.
+        Numba 있으면 JIT 가속, 없으면 OpenCV connectedComponents 경로 사용.
+        """
+        if _NUMBA_OK:
+            self._extract_bb_numba()
+        else:
+            self._extract_bb_opencv()
 
+    def _extract_bb_numba(self):
+        """Numba JIT 경로."""
         u_min = int(self.threshold_point * self.row_downsample)
-        uvboxes: List[UVbox] = []
-
-        for row in range(rows):
-            sum_line = 0
-            max_line = 0
-            length_line = 0
-            seg_id_local = len(uvboxes)
-
-            col = 0
-            while col <= cols:
-                val = int(self.U_map[row, col]) if col < cols else 0
-
-                if col < cols and val >= u_min:
-                    length_line += 1
-                    sum_line += val
-                    if val > max_line:
-                        max_line = val
-
-                # 포인트가 아니거나 행 끝
-                if val < u_min or col == cols - 1:
-                    # 행 끝이면 col 보정
-                    end_col = col + 1 if col == cols - 1 else col
-
-                    if (length_line > self.min_length_line and
-                            sum_line > self.threshold_line * max_line):
-                        new_seg_id = len(uvboxes) + 1
-                        new_box = UVbox(new_seg_id, row,
-                                        end_col - length_line, end_col - 1)
-                        uvboxes.append(new_box)
-
-                        for c in range(end_col - length_line, end_col - 1):
-                            mask[row][c] = new_seg_id
-
-                        if row != 0:
-                            for c in range(end_col - length_line, end_col - 1):
-                                if c < cols and mask[row - 1][c] != 0:
-                                    prev_sid = mask[row - 1][c]
-                                    prev_box = uvboxes[prev_sid - 1]
-
-                                    if prev_box.toppest_parent_id < uvboxes[-1].toppest_parent_id:
-                                        uvboxes[-1].toppest_parent_id = prev_box.toppest_parent_id
-                                    else:
-                                        temp = prev_box.toppest_parent_id
-                                        for b in range(len(uvboxes)):
-                                            if uvboxes[b].toppest_parent_id == temp:
-                                                uvboxes[b].toppest_parent_id = uvboxes[-1].toppest_parent_id
-
-                    sum_line = 0
-                    max_line = 0
-                    length_line = 0
-
-                col += 1
-
-        # 같은 parent 박스 병합
+        _, seg_rows, seg_lefts, seg_rights, seg_parents = _extract_bb_scan(
+            self.U_map, u_min, self.min_length_line, float(self.threshold_line)
+        )
+        n = len(seg_rows)
         self.bounding_box_U = []
-        for b in range(len(uvboxes)):
-            if uvboxes[b].id == uvboxes[b].toppest_parent_id:
-                for s in range(b + 1, len(uvboxes)):
-                    if uvboxes[s].toppest_parent_id == uvboxes[b].id:
-                        uvboxes[b] = merge_two_uvbox(uvboxes[b], uvboxes[s])
+        for b in range(n):
+            if seg_parents[b] != b + 1:
+                continue
+            top   = int(seg_rows[b]);  bot   = int(seg_rows[b])
+            left  = int(seg_lefts[b]); right = int(seg_rights[b])
+            for s in range(b + 1, n):
+                if seg_parents[s] == b + 1:
+                    top   = min(top,   int(seg_rows[s]))
+                    left  = min(left,  int(seg_lefts[s]))
+                    bot   = max(bot,   int(seg_rows[s]))
+                    right = max(right, int(seg_rights[s]))
+            bb = Rect(left, top, right - left, bot - top)
+            if bb.area() >= 25:
+                self.bounding_box_U.append(bb)
 
-                if uvboxes[b].bb.area() >= 25:
-                    self.bounding_box_U.append(uvboxes[b].bb.copy())
+    def _extract_bb_opencv(self):
+        """OpenCV connectedComponents 경로 (Numba 없을 때 fallback).
+
+        전략:
+          1. U_map >= u_min 으로 binary mask 생성
+          2. 행별로 numpy diff를 써서 유효 run (길이 > min_length_line,
+             품질 조건 sum > threshold_line * max) 만 남긴 filtered mask 생성
+          3. cv2.connectedComponentsWithStats (C++ 백엔드) 로 bbox 추출
+        """
+        u_min          = int(self.threshold_point * self.row_downsample)
+        min_len        = self.min_length_line
+        thresh_line    = self.threshold_line
+        rows, cols     = self.U_map.shape
+
+        # Step 1: threshold → binary
+        binary = (self.U_map >= u_min).astype(np.uint8)
+
+        # Step 2: run-quality 필터 (행 루프 120회 정도, 내부는 numpy)
+        filtered = np.zeros_like(binary)
+        for row in range(rows):
+            row_bin = binary[row]
+            if not row_bin.any():
+                continue
+            # run 경계 찾기: diff([0, row_bin, 0])
+            padded = np.empty(cols + 2, dtype=np.int8)
+            padded[0] = 0; padded[1:-1] = row_bin; padded[-1] = 0
+            d = np.diff(padded)
+            starts = np.where(d == 1)[0]   # run 시작 col
+            ends   = np.where(d == -1)[0]  # run 끝 col (exclusive)
+            for s, e in zip(starts, ends):
+                length = int(e - s)
+                if length <= min_len:
+                    continue
+                run_vals = self.U_map[row, s:e]
+                mx = int(run_vals.max())
+                if mx == 0:
+                    continue
+                if int(run_vals.sum()) > thresh_line * mx:
+                    filtered[row, s:e] = 1
+
+        # Step 3: C++ 연결 컴포넌트 → bbox
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+            filtered, connectivity=8)
+
+        self.bounding_box_U = []
+        for lbl in range(1, n_labels):  # 0 = 배경
+            x = int(stats[lbl, cv2.CC_STAT_LEFT])
+            y = int(stats[lbl, cv2.CC_STAT_TOP])
+            w = int(stats[lbl, cv2.CC_STAT_WIDTH])
+            h = int(stats[lbl, cv2.CC_STAT_HEIGHT])
+            if w * h >= 25:
+                self.bounding_box_U.append(Rect(x, y, w, h))
 
     def extract_3Dbox(self):
         """C++ extract_3Dbox() 완전 동일"""
@@ -435,11 +536,13 @@ class UVdetector:
             in_range = (col_slice >= depth_in_near) & (col_slice <= depth_in_far)
             # num_check 연속 픽셀이 범위 안에 있는 행 찾기 (슬라이딩 합계)
             if in_range.shape[0] >= num_check:
-                kernel = np.ones(num_check, dtype=np.int32)
-                run = np.apply_along_axis(
-                    lambda col: np.convolve(col.astype(np.int32), kernel, mode='valid'),
-                    axis=0, arr=in_range.astype(np.int32)
-                )
+                # np.apply_along_axis + np.convolve 대신 cumsum sliding window (O(n) vs O(n*k))
+                arr_int = in_range.astype(np.int32)
+                cumsum  = np.cumsum(arr_int, axis=0)
+                run     = cumsum[num_check - 1:] - np.vstack([
+                    np.zeros((1, arr_int.shape[1]), dtype=np.int32),
+                    cumsum[:arr_int.shape[0] - num_check]
+                ])
                 hit_rows, _ = np.where(run >= num_check)
                 if len(hit_rows) > 0:
                     y_up = int(hit_rows.min())

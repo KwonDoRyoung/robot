@@ -654,9 +654,14 @@ class DynamicDetector:
             self._uv_detector.depth = self.depth_image.copy()
             self._uv_detector.detect()
             self._uv_detector.extract_3Dbox()
-            self._uv_detector.display_U_map()
-            self._uv_detector.display_bird_view()
-            self._uv_detector.display_depth()
+            # 구독자 있을 때만 시각화 (display 함수들은 꽤 비쌈)
+            vis_needed = (self._pub_uv_depth.get_num_connections() > 0 or
+                          self._pub_u_depth.get_num_connections() > 0 or
+                          self._pub_uv_bird.get_num_connections() > 0)
+            if vis_needed:
+                self._uv_detector.display_U_map()
+                self._uv_detector.display_bird_view()
+                self._uv_detector.display_depth()
             self.uv_bboxes = self._transform_uv_bboxes()
 
     def _transform_uv_bboxes(self):
@@ -723,34 +728,30 @@ class DynamicDetector:
         vs = np.arange(m, rows - m, sp)
         us = np.arange(m, cols - m, sp)
         vv, uu = np.meshgrid(vs, us, indexing='ij')  # shape (nv, nu)
-        raw = depth[vv, uu].astype(np.float64)  # uint16 mm
+        # float32 사용: float64 대비 메모리 절반, ARM/CUDA에서 2배 빠름
+        raw = depth[vv, uu].astype(np.float32)  # uint16 mm
 
         depth_vals = raw * inv_factor
 
         # Handle zero/out-of-range
         invalid_zero = (raw == 0)
-        invalid_far = (depth_vals > self.depth_max) & (~invalid_zero)
         valid = (~invalid_zero) & (depth_vals >= self.depth_min) & (depth_vals <= self.depth_max)
 
-        # Set sentinel depth for non-valid
-        depth_use = depth_vals.copy()
-        depth_use[invalid_zero] = self.raycast_max + 0.1
-        depth_use[invalid_far] = self.raycast_max + 0.1
-
-        # Back-project valid points
-        vf = vv[valid].ravel().astype(np.float64)
-        uf = uu[valid].ravel().astype(np.float64)
+        # Back-project valid points (float32 유지)
+        vf = vv[valid].ravel().astype(np.float32)
+        uf = uu[valid].ravel().astype(np.float32)
         dv = depth_vals[valid].ravel()
 
         x_cam = (uf - self.cx) * dv * inv_fx
         y_cam = (vf - self.cy) * dv * inv_fy
         z_cam = dv
 
-        pts_cam = np.stack([x_cam, y_cam, z_cam], axis=1)  # Nx3
-        pts_world = (self.orientation_depth @ pts_cam.T).T + self.position_depth
+        pts_cam = np.stack([x_cam, y_cam, z_cam], axis=1)  # Nx3, float32
+        ori = self.orientation_depth.astype(np.float32)
+        pts_world = (ori @ pts_cam.T).T + self.position_depth.astype(np.float32)
 
-        self.proj_points = pts_world          # ndarray (N,3)
-        self.points_depth = dv                 # ndarray (N,)
+        self.proj_points = pts_world          # ndarray (N,3), float32
+        self.points_depth = dv                 # ndarray (N,), float32
         self.proj_points_num = len(pts_world)
 
     # ------------------------------------------------------------------
@@ -759,10 +760,12 @@ class DynamicDetector:
 
     def _filter_points(self):
         voxel_filtered = self._voxel_filter()
-        self.filtered_depth_points = [
-            p for p in voxel_filtered
-            if self.ground_height <= p[2] <= self.roof_height
-        ]
+        if isinstance(voxel_filtered, np.ndarray) and len(voxel_filtered) > 0:
+            # numpy 불리언 인덱싱 — Python list comprehension 제거
+            mask = (voxel_filtered[:, 2] >= self.ground_height) & (voxel_filtered[:, 2] <= self.roof_height)
+            self.filtered_depth_points = voxel_filtered[mask]
+        else:
+            self.filtered_depth_points = np.zeros((0, 3), dtype=np.float32)
 
     def _voxel_filter(self):
         if self.proj_points_num == 0:
@@ -808,11 +811,10 @@ class DynamicDetector:
         occ = np.zeros(total, dtype=np.int32)
         np.add.at(occ, addr, 1)
 
-        # 임계값 이상인 voxel의 대표점 1개씩 수집
+        # 임계값 이상인 voxel의 대표점 1개씩 수집 (numpy array로 반환)
         hit = occ[addr] >= self.voxel_occ_thresh
         _, first_idx = np.unique(addr[hit], return_index=True)
-        result_arr = pts_f[hit][first_idx]
-        return [result_arr[i] for i in range(len(result_arr))]
+        return pts_f[hit][first_idx]  # ndarray (K,3) — list 변환 비용 제거
 
     # ------------------------------------------------------------------
     # DBSCAN clustering
@@ -820,42 +822,47 @@ class DynamicDetector:
 
     def _cluster_points_and_bboxes(self, points):
         """Returns (bboxes, pc_clusters, pc_cluster_centers, pc_cluster_stds)."""
-        if not points:
+        if points is None or (hasattr(points, '__len__') and len(points) == 0):
             return [], [], [], []
 
-        pts_arr = np.array(points, dtype=np.float32) if not isinstance(points, np.ndarray) else points.astype(np.float32)
+        # numpy array로 받거나 변환 (list of arrays → np.vstack보다 빠름)
+        if isinstance(points, np.ndarray):
+            pts_arr = points.astype(np.float32) if points.dtype != np.float32 else points
+        else:
+            pts_arr = np.array(points, dtype=np.float32)
+
         # db_epsilon은 원본이 제곱거리 기준이었으므로 sqrt 변환
         eps = math.sqrt(self.db_epsilon)
         labels = dbscan_gpu(pts_arr, eps=eps, min_samples=self.db_min_pts)
 
-        unique_labels = set(labels)
-        unique_labels.discard(-1)  # noise 제거
-        clusters_temp = [pts_arr[labels == lbl].tolist() for lbl in sorted(unique_labels)]
+        unique_labels = sorted(set(labels) - {-1})
+        # numpy 슬라이스 유지 — .tolist() 변환 제거
+        clusters_temp = [pts_arr[labels == lbl] for lbl in unique_labels]
 
         bboxes, pc_clusters, pc_centers, pc_stds = [], [], [], []
-        for cluster in clusters_temp:
-            if not cluster:
+        for arr in clusters_temp:
+            if len(arr) == 0:
                 continue
-            arr = np.array(cluster)
             xmin, ymin, zmin = arr.min(axis=0)
             xmax, ymax, zmax = arr.max(axis=0)
 
             box = Box3D()
-            box.x = (xmax + xmin) / 2.0
-            box.y = (ymax + ymin) / 2.0
-            box.z = (zmax + zmin) / 2.0
-            box.x_width = max(xmax - xmin, 0.1)
-            box.y_width = max(ymax - ymin, 0.1)
-            box.z_width = zmax - zmin
+            box.x = float((xmax + xmin) / 2.0)
+            box.y = float((ymax + ymin) / 2.0)
+            box.z = float((zmax + zmin) / 2.0)
+            box.x_width = float(max(xmax - xmin, 0.1))
+            box.y_width = float(max(ymax - ymin, 0.1))
+            box.z_width = float(zmax - zmin)
 
             if (box.x_width > self.max_object_size[0] or
                     box.y_width > self.max_object_size[1] or
                     box.z_width > self.max_object_size[2]):
                 continue
 
-            center, std = self._calc_pc_feat(cluster)
+            center = arr.mean(axis=0)
+            std = np.sqrt(np.mean((arr - center) ** 2, axis=0))
             bboxes.append(box)
-            pc_clusters.append(cluster)
+            pc_clusters.append(arr)   # numpy array 유지
             pc_centers.append(center)
             pc_stds.append(std)
 
@@ -996,12 +1003,12 @@ class DynamicDetector:
         # STEP 2: Prepare lidar bboxes
         for i, lbbox in enumerate(self.lidar_bboxes):
             cluster = self.lidar_clusters[i]
-            pts = cluster.points  # Nx3
-            pc_list = [pts[j] for j in range(len(pts))]
+            pts = cluster.points  # Nx3 (numpy array)
+            # Python list 변환 제거 — numpy array 그대로 유지
             center = np.array([cluster.centroid[0], cluster.centroid[1], cluster.centroid[2]])
             std = np.sqrt(np.abs(cluster.eigen_values))
             lidar_bboxes_temp.append(lbbox)
-            lidar_clusters_temp.append(pc_list)
+            lidar_clusters_temp.append(pts)  # numpy array 유지
             lidar_centers_temp.append(center)
             lidar_stds_temp.append(std)
 
@@ -1482,32 +1489,37 @@ class DynamicDetector:
             ])
             Vkf = np.array([bh[0].Vx, bh[0].Vy, 0.0])
 
-            num_pts = len(curr_pc)
+            # numpy array로 일괄 변환 (매 포인트마다 np.array() 제거)
+            curr_arr = curr_pc if isinstance(curr_pc, np.ndarray) else np.array(curr_pc)
+            prev_pts = prev_pc if isinstance(prev_pc, np.ndarray) else (
+                np.array(prev_pc) if prev_pc else np.zeros((0, 3))
+            )
+            num_pts = len(curr_arr)
             votes = 0
-            prev_pts = np.array(prev_pc) if prev_pc else np.zeros((0, 3))
 
-            for j, cp in enumerate(curr_pc):
-                cp_arr = np.array(cp)
-                if len(prev_pts) == 0:
-                    break
-                dists = np.linalg.norm(prev_pts - cp_arr, axis=1)
-                k_nn = np.argmin(dists)
-                nearest_vect = cp_arr - np.array(prev_pc[k_nn])
-                Vcur_raw = nearest_vect / (self.dt * cur_frame_gap) if cur_frame_gap > 0 else np.zeros(3)
-                Vcur = np.array([Vcur_raw[0], Vcur_raw[1], 0.0])
+            if len(prev_pts) > 0 and num_pts > 0:
+                # 벡터화: 각 curr 포인트의 nearest neighbor in prev (N×M 거리 행렬)
+                # curr_arr: (N,3), prev_pts: (M,3) → diff: (N,M,3)
+                diff = curr_arr[:, None, :] - prev_pts[None, :, :]  # (N,M,3)
+                dists2 = (diff ** 2).sum(axis=2)                     # (N,M)
+                nn_idx = dists2.argmin(axis=1)                       # (N,)
+                nearest_vects = curr_arr - prev_pts[nn_idx]          # (N,3)
+                if cur_frame_gap > 0:
+                    Vcur_raw = nearest_vects / (self.dt * cur_frame_gap)
+                else:
+                    Vcur_raw = np.zeros_like(nearest_vects)
+                Vcur_xy = np.stack([Vcur_raw[:, 0], Vcur_raw[:, 1], np.zeros(num_pts)], axis=1)  # (N,3)
 
                 vbox_n = np.linalg.norm(Vbox)
-                vcur_n = np.linalg.norm(Vcur)
-                if vbox_n > 0 and vcur_n > 0:
-                    vel_sim = Vcur.dot(Vbox) / (vcur_n * vbox_n)
-                else:
-                    vel_sim = 0.0
-
-                if vel_sim < 0:
-                    num_pts -= 1
-                else:
-                    if vcur_n > self.dyna_vel_thresh:
-                        votes += 1
+                vcur_ns = np.linalg.norm(Vcur_xy, axis=1)           # (N,)
+                valid_mask = (vbox_n > 0) & (vcur_ns > 0)
+                vel_sim = np.where(
+                    valid_mask,
+                    (Vcur_xy @ Vbox) / (vcur_ns * vbox_n + 1e-9),
+                    0.0
+                )
+                num_pts -= int((vel_sim < 0).sum())
+                votes = int(((vel_sim >= 0) & (vcur_ns > self.dyna_vel_thresh)).sum())
 
             vote_ratio = float(votes) / float(num_pts) if num_pts > 0 else 0.0
             vel_norm = np.linalg.norm(Vkf)
