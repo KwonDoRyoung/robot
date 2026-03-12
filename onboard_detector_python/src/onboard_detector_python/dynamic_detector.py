@@ -593,8 +593,13 @@ class DynamicDetector:
     def _classification_cb(self, event):
         with self._lock:
             self._classify()
+            # dynamic_bboxes를 base_link 기준으로 변환하여 발행
+            _dyn = [self._box_world_to_body(b, self.position.copy(), self.orientation.copy())
+                    for b in self.dynamic_bboxes]
+            self._publish_3d_box(_dyn, self._pub_dynamic_bboxes, 0, 0, 1)
 
     def _vis_cb(self, event):
+        return  # 시각화 비활성화 (detection 성능 확보)
         # lock은 데이터 스냅샷에만 사용 → publish/직렬화 등 무거운 작업은 lock 밖에서
         with self._lock:
             _uv_det        = self._uv_detector

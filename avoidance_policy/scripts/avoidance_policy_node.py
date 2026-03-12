@@ -59,14 +59,15 @@ class AvoidancePolicy:
     TRACK_TIMEOUT = 1.0
 
     # 정책을 수행할 pos_x 범위 (m): 이 범위 밖의 객체는 무시
-    POLICY_X_MIN = 2.0
+    POLICY_X_MIN = 1.0
     POLICY_X_MAX = 4.0
 
     # 동적 객체 수가 이 값을 초과하면 무조건 STOP (단일 객체 정책만 유효)
     MAX_OBJECTS_FOR_POLICY = 1
 
     # stop/turn 정책이 최초 트리거된 후 이 시간(초) 동안 유지
-    POLICY_DURATION = 3.0
+    POLICY_DURATION = 1.75     # 정책 총 시간 (초): Phase1(2s) + Phase2(2s)
+    PHASE1_DURATION = 0.75     # Phase1 회피 시간 (초)
     # ────────────────────────────────────────────────────────────────────────
 
     def __init__(self):
@@ -165,15 +166,17 @@ class AvoidancePolicy:
         self._publish_policy(twist, "STOP", state, zone, sign_vx, sign_vy)
 
     def turn_left_policy(self, state: str, zone: str, sign_vx: int, sign_vy: int):
-        """linear x=0.0, angular z=+0.5 으로 왼쪽(+y) 회피."""
+        """Phase1: 좌회피, Phase2: 우복귀."""
         twist = Twist()
-        twist.angular.z = 0.5
+        twist.linear.x = 0.36
+        twist.angular.z = 0.72
         self._publish_policy(twist, "TURN_LEFT", state, zone, sign_vx, sign_vy)
 
     def turn_right_policy(self, state: str, zone: str, sign_vx: int, sign_vy: int):
-        """linear x=0.0, angular z=-0.5 으로 오른쪽(-y) 회피."""
+        """Phase1: 우회피, Phase2: 좌복귀."""
         twist = Twist()
-        twist.angular.z = -0.5
+        twist.linear.x = 0.36
+        twist.angular.z = -0.72
         self._publish_policy(twist, "TURN_RIGHT", state, zone, sign_vx, sign_vy)
 
     # ── 정책 실행 ────────────────────────────────────────────────────────────
@@ -188,7 +191,7 @@ class AvoidancePolicy:
             self.turn_right_policy(state, zone, sign_vx, sign_vy)
 
         elif state == "L_APPROACH_CENTER":
-            self.stop_policy(state, zone, sign_vx, sign_vy)
+            self.turn_right_policy(state, zone, sign_vx, sign_vy)
 
         elif state == "C_APPROACH":
             self.stop_policy(state, zone, sign_vx, sign_vy)
@@ -203,7 +206,7 @@ class AvoidancePolicy:
             self.turn_left_policy(state, zone, sign_vx, sign_vy)
 
         elif state == "R_APPROACH_CENTER":
-            self.stop_policy(state, zone, sign_vx, sign_vy)
+            self.turn_left_policy(state, zone, sign_vx, sign_vy)
 
         # SAFE, L_APPROACH_OUTWARD, R_APPROACH_OUTWARD → 미발행
 
@@ -230,12 +233,21 @@ class AvoidancePolicy:
             elapsed = (now - self._policy_start).to_sec()
             if elapsed < self.POLICY_DURATION:
                 twist = Twist()
+                phase1 = elapsed < self.PHASE1_DURATION
                 if self._policy_active == "TURN_LEFT":
-                    twist.linear.x = 0.2
-                    twist.angular.z = 0.5
+                    if phase1:
+                        twist.linear.x = 0.36
+                        twist.angular.z = 0.72
+                    else:
+                        twist.linear.x = 0.225
+                        twist.angular.z = -0.82
                 elif self._policy_active == "TURN_RIGHT":
-                    twist.linear.x = 0.2
-                    twist.angular.z = -0.5
+                    if phase1:
+                        twist.linear.x = 0.36
+                        twist.angular.z = -0.72
+                    else:
+                        twist.linear.x = 0.225
+                        twist.angular.z = 0.82
                 # STOP: twist 기본값 0.0
                 self._cmd_vel_pub.publish(twist)
                 return
