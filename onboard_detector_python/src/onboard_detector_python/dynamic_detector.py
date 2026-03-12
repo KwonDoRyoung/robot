@@ -344,6 +344,27 @@ class DynamicDetector:
         m2b = self._build_map2body(pos, quat_wxyz)
         return m2b @ self.body2lidar
 
+    def _world_to_body(self, pts_world, pos_body, R_body):
+        """World frame 좌표를 base_link frame으로 역변환.
+        pos_body: robot position in world (3,)
+        R_body: robot rotation matrix body→world (3,3)
+        pts_world: Nx3 array in world frame
+        Returns: Nx3 array in base_link frame
+        """
+        return (R_body.T @ (pts_world - pos_body).T).T
+
+    def _box_world_to_body(self, box, pos_body, R_body):
+        """Box3D의 x,y,z (world) → base_link 변환. 복사본 반환."""
+        b = box.copy()
+        p_world = np.array([box.x, box.y, box.z])
+        p_body = R_body.T @ (p_world - pos_body)
+        b.x, b.y, b.z = float(p_body[0]), float(p_body[1]), float(p_body[2])
+        # 속도도 회전만 역변환 (translation 불필요)
+        v_world = np.array([box.Vx, box.Vy, box.Vz])
+        v_body = R_body.T @ v_world
+        b.Vx, b.Vy, b.Vz = float(v_body[0]), float(v_body[1]), float(v_body[2])
+        return b
+
     def _extract_pose(self, pose_msg):
         """Extract (position np.ndarray(3,), quat_wxyz tuple) from PoseStamped."""
         p = pose_msg.pose.position
@@ -419,10 +440,10 @@ class DynamicDetector:
         rands = np.random.rand(len(pts))
         pts = pts[rands < probs]
 
-        # Transform to world frame
-        lidar_mat = self._get_lidar_pose(pos, quat)
-        R = lidar_mat[:3, :3]
-        t = lidar_mat[:3, 3]
+        # Transform to world frame (rslidar_points는 이미 base_link 기준 → body2lidar 불필요)
+        m2b = self._build_map2body(pos, quat)
+        R = m2b[:3, :3]
+        t = m2b[:3, 3]
         pts_world = (R @ pts.T).T + t
 
         # Z filter (ground/roof)
@@ -448,13 +469,13 @@ class DynamicDetector:
 
         self.lidar_cloud_pts = pts_world
 
-        # Publish downsampled cloud for visualization
-        self._publish_np_pointcloud(pts_world, self._pub_downsample_pts, "base_link")
+        # Publish downsampled cloud for visualization (world→base_link 역변환)
+        pts_body = self._world_to_body(pts_world, t, R) if len(pts_world) > 0 else pts_world
+        self._publish_np_pointcloud(pts_body, self._pub_downsample_pts, "base_link")
 
-        # Store lidar sensor pose
-        lidar_mat2 = self._get_lidar_pose(pos, quat)
-        self.position_lidar = lidar_mat2[:3, 3]
-        self.orientation_lidar = lidar_mat2[:3, :3]
+        # Store lidar sensor pose (base_link = body frame이므로 body pose 그대로 사용)
+        self.position_lidar = t.copy()
+        self.orientation_lidar = R.copy()
 
     def _lidar_pose_cb(self, cloud_msg, pose_msg):
         with self._lock:
@@ -591,6 +612,20 @@ class DynamicDetector:
             _fdp           = self.filtered_depth_points
             _fdp_arr       = (_fdp if isinstance(_fdp, np.ndarray) else np.array(_fdp)) if len(_fdp) > 0 else np.zeros((0, 3))
             _dyn_bboxes_snap = list(self.dynamic_bboxes)
+            # world→base_link 역변환용 로봇 pose 스냅샷
+            _pos_body = self.position.copy()
+            _R_body   = self.orientation.copy()
+
+        # -- world→base_link 변환 적용 --
+        _uv_bboxes   = [self._box_world_to_body(b, _pos_body, _R_body) for b in _uv_bboxes]
+        _db_bboxes   = [self._box_world_to_body(b, _pos_body, _R_body) for b in _db_bboxes]
+        _vis_bboxes  = [self._box_world_to_body(b, _pos_body, _R_body) for b in _vis_bboxes]
+        _lidar_bboxes= [self._box_world_to_body(b, _pos_body, _R_body) for b in _lidar_bboxes]
+        _fby_bboxes  = [self._box_world_to_body(b, _pos_body, _R_body) for b in _fby_bboxes]
+        _filt_bboxes = [self._box_world_to_body(b, _pos_body, _R_body) for b in _filt_bboxes]
+        _track_bboxes= [self._box_world_to_body(b, _pos_body, _R_body) for b in _track_bboxes]
+        _dyn_bboxes  = [self._box_world_to_body(b, _pos_body, _R_body) for b in _dyn_bboxes]
+        _dyn_bboxes_snap = _dyn_bboxes  # 이미 변환됨
 
         # -- lock 밖에서 publish (느린 직렬화/포인트클라우드 변환 포함) --
         self._publish_uv_images_snap(_uv_det)
@@ -603,15 +638,19 @@ class DynamicDetector:
         self._publish_3d_box(_filt_bboxes, self._pub_filtered_bboxes,     0, 1, 1)
         self._publish_3d_box(_track_bboxes,self._pub_tracked_bboxes,      1, 1, 0)
         self._publish_3d_box(_dyn_bboxes,  self._pub_dynamic_bboxes,      0, 0, 1)
-        self._publish_lidar_clusters_snap(_lidar_clust)
-        self._publish_filtered_points_snap(_filt_clust)
+        self._publish_lidar_clusters_snap(_lidar_clust, _pos_body, _R_body)
+        self._publish_filtered_points_snap(_filt_clust, _pos_body, _R_body)
         dynamic_pts = self._get_dynamic_pc_snap(_filt_clust, _dyn_bboxes_snap)
-        self._publish_np_pointcloud(np.array(dynamic_pts) if dynamic_pts else np.zeros((0, 3)),
-                                    self._pub_dynamic_pts, "base_link")
+        dyn_arr = np.array(dynamic_pts) if dynamic_pts else np.zeros((0, 3))
+        if len(dyn_arr) > 0:
+            dyn_arr = self._world_to_body(dyn_arr, _pos_body, _R_body)
+        self._publish_np_pointcloud(dyn_arr, self._pub_dynamic_pts, "base_link")
+        if len(_fdp_arr) > 0:
+            _fdp_arr = self._world_to_body(_fdp_arr, _pos_body, _R_body)
         self._publish_np_pointcloud(_fdp_arr, self._pub_filtered_depth_pts, "base_link")
         self._publish_raw_dynamic_points()
-        self._publish_history_traj()
-        self._publish_vel_vis()
+        self._publish_history_traj(_pos_body, _R_body)
+        self._publish_vel_vis(_pos_body, _R_body)
 
     # ------------------------------------------------------------------
     # Service handler
@@ -1705,7 +1744,7 @@ class DynamicDetector:
             line.action = Marker.ADD
             line.scale.x = 0.06
             line.color.r = r; line.color.g = g; line.color.b = b; line.color.a = 1.0
-            line.lifetime = rospy.Duration(0.3)
+            line.lifetime = rospy.Duration(0.06)
             line.pose.orientation.w = 1.0
             line.pose.position.x = box.x
             line.pose.position.y = box.y
@@ -1742,7 +1781,7 @@ class DynamicDetector:
         cloud_msg = pc2.create_cloud(header, fields, pts.tolist())
         publisher.publish(cloud_msg)
 
-    def _publish_history_traj(self):
+    def _publish_history_traj(self, pos_body=None, R_body=None):
         traj_msg = MarkerArray()
         count = 0
         for i, bh in enumerate(self.box_hist):
@@ -1760,13 +1799,19 @@ class DynamicDetector:
             bh_list = list(bh)
             for j in range(len(bh_list) - 1):
                 b1, b2 = bh_list[j], bh_list[j+1]
-                traj.points.append(self._make_point_msg(b1.x, b1.y, b1.z))
-                traj.points.append(self._make_point_msg(b2.x, b2.y, b2.z))
+                if pos_body is not None and R_body is not None:
+                    p1 = R_body.T @ (np.array([b1.x, b1.y, b1.z]) - pos_body)
+                    p2 = R_body.T @ (np.array([b2.x, b2.y, b2.z]) - pos_body)
+                    traj.points.append(self._make_point_msg(p1[0], p1[1], p1[2]))
+                    traj.points.append(self._make_point_msg(p2[0], p2[1], p2[2]))
+                else:
+                    traj.points.append(self._make_point_msg(b1.x, b1.y, b1.z))
+                    traj.points.append(self._make_point_msg(b2.x, b2.y, b2.z))
             traj_msg.markers.append(traj)
             count += 1
         self._pub_history_traj.publish(traj_msg)
 
-    def _publish_vel_vis(self):
+    def _publish_vel_vis(self, pos_body=None, R_body=None):
         vel_msg = MarkerArray()
         for i, tb in enumerate(self.tracked_bboxes):
             vm = Marker()
@@ -1775,9 +1820,15 @@ class DynamicDetector:
             vm.ns = "dynamic_detector"
             vm.id = i
             vm.type = Marker.TEXT_VIEW_FACING
-            vm.pose.position.x = tb.x
-            vm.pose.position.y = tb.y
-            vm.pose.position.z = tb.z + tb.z_width / 2.0 + 0.3
+            if pos_body is not None and R_body is not None:
+                p = R_body.T @ (np.array([tb.x, tb.y, tb.z]) - pos_body)
+                vm.pose.position.x = p[0]
+                vm.pose.position.y = p[1]
+                vm.pose.position.z = p[2] + tb.z_width / 2.0 + 0.3
+            else:
+                vm.pose.position.x = tb.x
+                vm.pose.position.y = tb.y
+                vm.pose.position.z = tb.z + tb.z_width / 2.0 + 0.3
             vm.scale.x = vm.scale.y = vm.scale.z = 0.15
             vm.color.a = 1.0; vm.color.r = 1.0
             vm.lifetime = rospy.Duration(0.1)
@@ -1817,13 +1868,17 @@ class DynamicDetector:
         except Exception:
             pass
 
-    def _publish_lidar_clusters_snap(self, lidar_clusters):
+    def _publish_lidar_clusters_snap(self, lidar_clusters, pos_body=None, R_body=None):
         pts_xyzrgb = []
         for cluster in lidar_clusters:
             random.seed(cluster.cluster_id)
             rc = random.random(); gc = random.random(); bc = random.random()
             for pt in cluster.points:
-                pts_xyzrgb.append((pt[0], pt[1], pt[2], rc, gc, bc))
+                if pos_body is not None and R_body is not None:
+                    p = R_body.T @ (np.array(pt[:3]) - pos_body)
+                    pts_xyzrgb.append((p[0], p[1], p[2], rc, gc, bc))
+                else:
+                    pts_xyzrgb.append((pt[0], pt[1], pt[2], rc, gc, bc))
         if not pts_xyzrgb:
             return
         header = Header(frame_id="base_link", stamp=rospy.Time.now())
@@ -1837,11 +1892,15 @@ class DynamicDetector:
         ]
         self._pub_lidar_clusters.publish(pc2.create_cloud(header, fields, pts_xyzrgb))
 
-    def _publish_filtered_points_snap(self, filtered_pc_clusters):
+    def _publish_filtered_points_snap(self, filtered_pc_clusters, pos_body=None, R_body=None):
         pts_xyzrgb = []
         for cluster in filtered_pc_clusters:
             for pt in cluster:
-                pts_xyzrgb.append((float(pt[0]), float(pt[1]), float(pt[2]), 0.5, 0.5, 0.5))
+                if pos_body is not None and R_body is not None:
+                    p = R_body.T @ (np.array([float(pt[0]), float(pt[1]), float(pt[2])]) - pos_body)
+                    pts_xyzrgb.append((p[0], p[1], p[2], 0.5, 0.5, 0.5))
+                else:
+                    pts_xyzrgb.append((float(pt[0]), float(pt[1]), float(pt[2]), 0.5, 0.5, 0.5))
         if not pts_xyzrgb:
             return
         header = Header(frame_id="base_link", stamp=rospy.Time.now())
@@ -1921,8 +1980,9 @@ class DynamicDetector:
                 R = self.orientation_lidar
                 t = self.position_lidar
                 global_pts = (R @ pts.T).T + t
-                # publish raw lidar
-                self._publish_np_pointcloud(global_pts, self._pub_raw_lidar_pts, "base_link")
+                # world→base_link 역변환 후 publish
+                body_pts = self._world_to_body(global_pts, t, R)
+                self._publish_np_pointcloud(body_pts, self._pub_raw_lidar_pts, "base_link")
             else:
                 global_pts = pts
 
@@ -1939,7 +1999,9 @@ class DynamicDetector:
                 dyn_pts.extend(global_pts[mask].tolist())
 
             if dyn_pts:
-                self._publish_np_pointcloud(np.array(dyn_pts), self._pub_raw_dynamic_pts, "base_link")
+                dyn_arr = np.array(dyn_pts)
+                dyn_arr = self._world_to_body(dyn_arr, t, R)
+                self._publish_np_pointcloud(dyn_arr, self._pub_raw_dynamic_pts, "base_link")
         except Exception as e:
             rospy.logerr(f"publishRawDynamicPoints error: {e}")
 

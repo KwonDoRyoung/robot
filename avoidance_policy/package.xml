@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>avoidance_policy</name>
+  <version>1.0.0</version>
+  <description>Dynamic obstacle avoidance policy with twist_mux integration</description>
+  <maintainer email="irop@irop.com">irop</maintainer>
+
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>twist_mux</exec_depend>
+
+  <export>
+  </export>
+</package>

@@ -1,0 +1,14 @@
+# twist_mux 토픽 우선순위 설정
+# priority가 높은 토픽이 활성 상태이면 낮은 토픽을 무시
+# timeout: 해당 토픽에 메시지가 이 시간(초) 동안 없으면 비활성 처리
+topics:
+  - name: nav
+    topic: cmd_vel_nav
+    timeout: 0.5
+    priority: 10
+  - name: avoidance
+    topic: cmd_vel_policy
+    timeout: 0.5
+    priority: 20
+
+locks: []

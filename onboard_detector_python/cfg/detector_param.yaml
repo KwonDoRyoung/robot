@@ -33,9 +33,9 @@ body_to_lidar:  [1.0,  0.0,  0.0,  0.0,
                  0.0,  0.0,  0.0,  1.0]
 
 # System
-time_step: 0.033          # detection/lidar timer (30Hz target)
-tracking_time_step: 0.05  # tracking timer (20Hz)
-vis_time_step: 0.1        # visualization timer (10Hz)
+time_step: 0.067          # detection/lidar timer (15Hz, LiDAR 입력 속도에 맞춤)
+tracking_time_step: 0.033 # tracking timer (30Hz, Kalman 예측 부드럽게)
+vis_time_step: 0.05       # visualization timer (20Hz, bbox 갱신 주기 향상)
 
 # DBSCAN Common
 ground_height: 0.2 # height of ground to remove ground points

@@ -1,16 +1,4 @@
 Panels:
-  - Class: rviz/Displays
-    Help Height: 0
-    Name: Displays
-    Property Tree Widget:
-      Expanded: ~
-      Splitter Ratio: 0.5
-    Tree Height: 400
-  - Class: rviz/Views
-    Expanded:
-      - /Current View1
-    Name: Views
-    Splitter Ratio: 0.5
   - Class: rviz/Time
     Name: Time
     SyncMode: 0
@@ -116,18 +104,6 @@ Visualization Manager:
       Transport Hint: raw
       Unreliable: false
       Value: true
-    - Class: rviz/Image
-      Enabled: true
-      Image Topic: /yolo_detector/detected_image
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: YOLO Detected Image
-      Normalize Range: true
-      Queue Size: 2
-      Transport Hint: raw
-      Unreliable: false
-      Value: true
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0
@@ -169,15 +145,9 @@ Visualization Manager:
 Window Geometry:
   Detected Color Image:
     collapsed: false
-  Displays:
-    collapsed: false
-  Height: 900
-  Hide Left Dock: false
-  Hide Right Dock: false
-  YOLO Detected Image:
-    collapsed: false
-  Views:
-    collapsed: false
-  Width: 1600
-  X: 100
-  Y: 100
+  Height: 1080
+  Hide Left Dock: true
+  Hide Right Dock: true
+  Width: 1920
+  X: 0
+  Y: 0

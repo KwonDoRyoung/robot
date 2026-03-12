@@ -1,0 +1,14 @@
+<launch>
+  <!-- twist_mux: 우선순위 기반 cmd_vel 멀티플렉서 -->
+  <!--   nav (priority 10):       /cmd_vel_nav     ← safety_manager -->
+  <!--   avoidance (priority 20): /cmd_vel_policy  ← avoidance_policy -->
+  <!--   output:                  /cmd_vel         → Robot -->
+  <node pkg="twist_mux" type="twist_mux" name="twist_mux" output="screen">
+    <rosparam file="$(find avoidance_policy)/cfg/twist_mux.yaml" command="load"/>
+    <remap from="cmd_vel_out" to="cmd_vel"/>
+  </node>
+
+  <!-- avoidance_policy 노드 -->
+  <node pkg="avoidance_policy" type="avoidance_policy_node.py"
+        name="avoidance_policy" output="screen"/>
+</launch>
